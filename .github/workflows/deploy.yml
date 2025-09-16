@@ -3,7 +3,7 @@ name: Deploy (Cloudflare Access)
 on:
   workflow_dispatch: {}
   push:
-    branches: [ master ]  # change if you deploy from a different branch
+    branches: [ master ]  # change if you deploy from another branch
 
 jobs:
   deploy:
@@ -13,8 +13,9 @@ jobs:
       HOST: ssh.evantrafton.me
       USER: evantrafton
       APP_DIR: /opt/apps/dashboard
-      SERVICE_NAME: dashboard  # used for systemd/PM2 fallback
-      # Cloudflare Access service token (must exist as repo secrets)
+      SERVICE_NAME: dashboard   # used for systemd/PM2 fallback
+
+      # Cloudflare Access service token (must be set as repo secrets)
       CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
       CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
 
@@ -46,7 +47,7 @@ jobs:
           set -euo pipefail
           TAR="release-${GITHUB_SHA}.tgz"
           git archive --format=tar.gz -o "$TAR" HEAD
-          echo "TAR=$TAR" >> $GITHUB_ENV
+          echo "TAR=$TAR" >> "$GITHUB_ENV"
 
       - name: Upload package to server (/tmp)
         run: |
@@ -55,12 +56,14 @@ jobs:
               -o ProxyCommand="cloudflared access ssh --hostname %h" \
               "$TAR" "$USER@$HOST:/tmp/release.tgz"
 
-      - name: Deploy, build, and restart service on server
+      - name: Deploy, build, and restart on server
         run: |
           set -euo pipefail
+          # Pass variables to the remote shell, then send the script via heredoc
           ssh -T -o StrictHostKeyChecking=accept-new \
                 -o ProxyCommand="cloudflared access ssh --hostname %h" \
-                "$USER@$HOST" "APP_DIR='$APP_DIR' SERVICE_NAME='${SERVICE_NAME:-dashboard}' bash -s" <<'REMOTE'
+                "$USER@$HOST" \
+                "APP_DIR='$APP_DIR' SERVICE_NAME='$SERVICE_NAME' bash -s --" <<'REMOTE'
           set -euo pipefail
 
           echo "→ Deploying to: $APP_DIR"
@@ -72,31 +75,27 @@ jobs:
           find "$APP_DIR" -type d -exec chmod 755 {} \;
           find "$APP_DIR" -type f -exec chmod 644 {} \;
 
-          # If there's a Node project, install deps and build (server-side)
+          # --- Node build (if applicable) ---
           if [ -f "$APP_DIR/package.json" ]; then
-            echo "→ Node project detected; installing dependencies"
+            echo "→ Node project detected; installing dependencies & building"
             cd "$APP_DIR"
 
-            # Prefer pnpm/yarn if lockfiles + binaries exist; else npm
+            # Choose the right package manager if present
             if [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then
-              pnpm install --frozen-lockfile --prod
+              pnpm install --frozen-lockfile
+              (pnpm -s build || true)
             elif [ -f yarn.lock ] && command -v yarn >/dev/null 2>&1; then
-              yarn install --frozen-lockfile --production
+              yarn install --frozen-lockfile
+              (yarn -s build || true)
             elif command -v npm >/dev/null 2>&1; then
-              npm ci --omit=dev
+              npm ci
+              (npm run -s build || true)
             else
-              echo "⚠️ No npm/yarn/pnpm found; skipping install"
+              echo "⚠️ No npm/yarn/pnpm found; skipping install/build"
             fi
-
-            echo "→ Attempting build (will skip if no script)"
-            # Try each tool; ignore if script missing
-            (command -v npm >/dev/null 2>&1 && npm run -s build) || \
-            (command -v yarn >/dev/null 2>&1 && yarn -s build) || \
-            (command -v pnpm >/dev/null 2>&1 && pnpm -s build) || \
-            echo "ℹ️ No build script or build skipped"
           fi
 
-          echo "→ Restarting service (Docker Compose » systemd » PM2 fallback)"
+          echo "→ Restarting service (Docker Compose → systemd → PM2 fallback)"
           RESTARTED=false
 
           # Docker Compose (compose v2 or legacy)
@@ -115,7 +114,7 @@ jobs:
             fi
           fi
 
-          # systemd unit
+          # systemd service
           if [ "$RESTARTED" = false ] && command -v systemctl >/dev/null 2>&1; then
             if systemctl list-unit-files | grep -q "^${SERVICE_NAME}\.service"; then
               echo "→ Restarting systemd service: $SERVICE_NAME"

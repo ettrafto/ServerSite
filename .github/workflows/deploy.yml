@@ -1,0 +1,142 @@
+name: Deploy (Cloudflare Access)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ master ]  # change if you deploy from a different branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      # --- EDIT THESE ---
+      HOST: ssh.evantrafton.me
+      USER: evantrafton
+      APP_DIR: /opt/apps/dashboard
+      SERVICE_NAME: dashboard  # used for systemd/PM2 fallback
+      # Cloudflare Access service token (must exist as repo secrets)
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cloudflared (client)
+        run: |
+          set -euo pipefail
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          cloudflared --version
+
+      - name: Start ssh-agent and add key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: SSH connectivity smoke
+        run: |
+          set -euo pipefail
+          ssh -o StrictHostKeyChecking=accept-new \
+              -o ProxyCommand="cloudflared access ssh --hostname %h" \
+              "$USER@$HOST" \
+              "whoami && hostname && test -w '$APP_DIR' && echo 'APP_DIR is writable ✅'"
+
+      - name: Package repository (source only)
+        run: |
+          set -euo pipefail
+          TAR="release-${GITHUB_SHA}.tgz"
+          git archive --format=tar.gz -o "$TAR" HEAD
+          echo "TAR=$TAR" >> $GITHUB_ENV
+
+      - name: Upload package to server (/tmp)
+        run: |
+          set -euo pipefail
+          scp -o StrictHostKeyChecking=accept-new \
+              -o ProxyCommand="cloudflared access ssh --hostname %h" \
+              "$TAR" "$USER@$HOST:/tmp/release.tgz"
+
+      - name: Deploy, build, and restart service on server
+        run: |
+          set -euo pipefail
+          ssh -T -o StrictHostKeyChecking=accept-new \
+                -o ProxyCommand="cloudflared access ssh --hostname %h" \
+                "$USER@$HOST" "APP_DIR='$APP_DIR' SERVICE_NAME='${SERVICE_NAME:-dashboard}' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          echo "→ Deploying to: $APP_DIR"
+          mkdir -p "$APP_DIR"
+          tar -xzf /tmp/release.tgz -C "$APP_DIR"
+          rm -f /tmp/release.tgz
+
+          # Basic, safe permissions
+          find "$APP_DIR" -type d -exec chmod 755 {} \;
+          find "$APP_DIR" -type f -exec chmod 644 {} \;
+
+          # If there's a Node project, install deps and build (server-side)
+          if [ -f "$APP_DIR/package.json" ]; then
+            echo "→ Node project detected; installing dependencies"
+            cd "$APP_DIR"
+
+            # Prefer pnpm/yarn if lockfiles + binaries exist; else npm
+            if [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then
+              pnpm install --frozen-lockfile --prod
+            elif [ -f yarn.lock ] && command -v yarn >/dev/null 2>&1; then
+              yarn install --frozen-lockfile --production
+            elif command -v npm >/dev/null 2>&1; then
+              npm ci --omit=dev
+            else
+              echo "⚠️ No npm/yarn/pnpm found; skipping install"
+            fi
+
+            echo "→ Attempting build (will skip if no script)"
+            # Try each tool; ignore if script missing
+            (command -v npm >/dev/null 2>&1 && npm run -s build) || \
+            (command -v yarn >/dev/null 2>&1 && yarn -s build) || \
+            (command -v pnpm >/dev/null 2>&1 && pnpm -s build) || \
+            echo "ℹ️ No build script or build skipped"
+          fi
+
+          echo "→ Restarting service (Docker Compose » systemd » PM2 fallback)"
+          RESTARTED=false
+
+          # Docker Compose (compose v2 or legacy)
+          if [ -f "$APP_DIR/docker-compose.yml" ] || [ -f "$APP_DIR/docker-compose.yaml" ]; then
+            cd "$APP_DIR"
+            if command -v docker >/dev/null 2>&1; then
+              if docker compose version >/dev/null 2>&1; then
+                docker compose pull || true
+                docker compose up -d --build
+                RESTARTED=true
+              elif command -v docker-compose >/dev/null 2>&1; then
+                docker-compose pull || true
+                docker-compose up -d --build
+                RESTARTED=true
+              fi
+            fi
+          fi
+
+          # systemd unit
+          if [ "$RESTARTED" = false ] && command -v systemctl >/dev/null 2>&1; then
+            if systemctl list-unit-files | grep -q "^${SERVICE_NAME}\.service"; then
+              echo "→ Restarting systemd service: $SERVICE_NAME"
+              sudo -n systemctl daemon-reload || true
+              sudo -n systemctl restart "$SERVICE_NAME"
+              sudo -n systemctl --no-pager --full status "$SERVICE_NAME" || true
+              RESTARTED=true
+            fi
+          fi
+
+          # PM2 process
+          if [ "$RESTARTED" = false ] && command -v pm2 >/dev/null 2>&1; then
+            echo "→ Reloading via PM2: $SERVICE_NAME"
+            pm2 reload "$SERVICE_NAME" || pm2 start npm --name "$SERVICE_NAME" -- start || true
+            pm2 save || true
+            RESTARTED=true
+          fi
+
+          if [ "$RESTARTED" = true ]; then
+            echo "✅ Deployment complete and service restarted."
+          else
+            echo "⚠️ No restart method found (no compose/systemd/pm2). Deployment complete without restart."
+          fi
+REMOTE

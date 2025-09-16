@@ -46,7 +46,7 @@ router.post('/register', async (req: Request, res: Response) => {
         email: user.email
       }
     })
-  } catch (error) {
+  } catch (error: unknown) {
     console.error('Registration error:', error)
     res.status(500).json({ error: 'Failed to create user' })
   }
@@ -90,7 +90,7 @@ router.post('/login', async (req: Request, res: Response) => {
         email: user.email
       }
     })
-  } catch (error) {
+  } catch (error: unknown) {
     console.error('Login error:', error)
     res.status(500).json({ error: 'Login failed' })
   }
@@ -98,7 +98,7 @@ router.post('/login', async (req: Request, res: Response) => {
 
 // Logout endpoint
 router.post('/logout', (req: Request, res: Response) => {
-  req.session?.destroy((err) => {
+  req.session?.destroy((err: Error | null) => {
     if (err) {
       console.error('Session destruction error:', err)
       return res.status(500).json({ error: 'Logout failed' })

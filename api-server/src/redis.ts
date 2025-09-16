@@ -1,18 +1,17 @@
 import { Queue, Worker } from 'bullmq'
-import IORedis from 'ioredis'
+import Redis from 'ioredis'
 import { config } from './config.js'
 
 // Redis connection with BullMQ-compatible options
-export const redis = new IORedis(config.redisUrl, {
+export const redis = new Redis(config.redisUrl, {
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
   lazyConnect: true,
-  retryDelayOnFailover: 100,
   connectTimeout: 10000
 })
 
 // Handle Redis connection errors gracefully
-redis.on('error', (err) => {
+redis.on('error', (err: Error) => {
   console.warn('Redis connection error:', err.message)
   console.warn('Continuing without Redis - background jobs will be disabled')
 })
@@ -38,8 +37,9 @@ export async function enqueueExampleJob(data: any) {
       },
     })
     console.log('✅ Example job enqueued')
-  } catch (error) {
-    console.warn('⚠️ Failed to enqueue job (Redis not available):', error.message)
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error)
+    console.warn('⚠️ Failed to enqueue job (Redis not available):', msg)
   }
 }
 
@@ -63,6 +63,17 @@ worker.on('failed', (job, err) => {
   console.error(`Job ${job?.id} failed:`, err)
 })
 
-worker.on('error', (err) => {
+worker.on('error', (err: Error) => {
   console.warn('Worker error (Redis not available):', err.message)
 })
+
+// Optional: helper with proper error typing
+export async function safeGet(key: string): Promise<string | null> {
+  try {
+    return await redis.get(key)
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[redis] get error:', msg)
+    return null
+  }
+}

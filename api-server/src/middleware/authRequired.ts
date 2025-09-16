@@ -12,6 +12,7 @@ export function authRequired(req: AuthenticatedRequest, res: Response, next: Nex
     return res.status(401).json({ error: 'Authentication required' })
   }
   
+  // Type assertion is safe here because we checked above
   req.user = req.session.user
   next()
 }

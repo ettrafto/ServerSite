@@ -32,3 +32,24 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction) 
 
   next()
 }
+
+export function attachCsrf(req: Request, res: Response, next: NextFunction) {
+  if (!req.session) return next()
+  if (!req.session.csrfToken) {
+    req.session.csrfToken = crypto.randomBytes(32).toString('hex')
+  }
+  res.setHeader('X-CSRF-Token', req.session.csrfToken)
+  next()
+}
+
+export function verifyCsrf(req: Request, res: Response, next: NextFunction) {
+  const token =
+    (req.get('x-csrf-token') ?? req.body?.csrfToken ?? req.query?.csrfToken) as
+      | string
+      | undefined
+
+  if (!req.session?.csrfToken || !token || token !== req.session.csrfToken) {
+    return res.status(403).json({ error: 'Invalid CSRF token' })
+  }
+  next()
+}

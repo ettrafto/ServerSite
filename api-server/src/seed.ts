@@ -41,8 +41,9 @@ async function main() {
 }
 
 main()
-  .catch((e) => {
-    console.error('❌ Seed failed:', e)
+  .catch((e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e)
+    console.error('❌ Seed failed:', msg)
     process.exit(1)
   })
   .finally(async () => {

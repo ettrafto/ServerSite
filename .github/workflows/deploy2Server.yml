@@ -1,0 +1,67 @@
+name: Deploy (Cloudflare Access)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      # --- adjust these for your host/user/target dir ---
+      HOST: ssh.evantrafton.me
+      USER: evantrafton
+      APP_DIR: /opt/apps/dashboard
+
+      # Cloudflare Access service token (set as repo secrets)
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cloudflared (client)
+        run: |
+          set -euo pipefail
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          cloudflared --version
+
+      - name: Start ssh-agent and add key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Package repository (source only)
+        run: |
+          set -euo pipefail
+          TAR="release-${GITHUB_SHA}.tgz"
+          git archive --format=tar.gz -o "$TAR" HEAD
+          echo "TAR=$TAR" >> $GITHUB_ENV
+
+      - name: Upload package to server (/tmp)
+        run: |
+          set -euo pipefail
+          scp -o StrictHostKeyChecking=accept-new \
+              -o ProxyCommand="cloudflared access ssh --hostname %h" \
+              "$TAR" "$USER@$HOST:/tmp/release.tgz"
+
+      - name: Deploy & basic configure on server
+        run: |
+          set -euo pipefail
+          ssh -T -o StrictHostKeyChecking=accept-new \
+                -o ProxyCommand="cloudflared access ssh --hostname %h" \
+                "$USER@$HOST" "APP_DIR='$APP_DIR' bash -s" <<'REMOTE'
+          set -euo pipefail
+          mkdir -p "$APP_DIR"
+          tar -xzf /tmp/release.tgz -C "$APP_DIR"
+          rm -f /tmp/release.tgz
+
+          # --- basic, safe permissions (owner rw, world r; dirs executable) ---
+          find "$APP_DIR" -type d -exec chmod 755 {} \;
+          find "$APP_DIR" -type f -exec chmod 644 {} \;
+
+          # --- optional: create an empty .env if missing ---
+          [ -f "$APP_DIR/.env" ] || touch "$APP_DIR/.env"
+
+          echo "✅ Code deployed to $APP_DIR and basic config applied."
+REMOTE

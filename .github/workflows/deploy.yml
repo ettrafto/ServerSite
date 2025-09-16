@@ -1,9 +1,6 @@
 name: Deploy via Cloudflare Access
-
 on:
   workflow_dispatch:
-  push:
-    branches: [ master ]  # change if you deploy from another branch
 
 jobs:
   deploy:
@@ -16,29 +13,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # (Optional) Build your app here if needed.
-      # - run: |
-      #     npm ci
-      #     npm run build
-
-      # Package the repo (excluding big caches)
-      - name: Create release tarball
-        run: |
-          set -euo pipefail
-          TAR=release-${GITHUB_SHA}.tgz
-          tar -czf "$TAR" \
-            --exclude='.git' \
-            --exclude='.github' \
-            --exclude='node_modules' \
-            .
-          echo "TAR=$TAR" >> $GITHUB_ENV
-
+      # Install cloudflared client
       - name: Install cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           cloudflared --version
 
+      # Export Access Service Token (must be in repo secrets)
       - name: Export Cloudflare Access env
         env:
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
@@ -47,12 +29,30 @@ jobs:
           echo "CF_ACCESS_CLIENT_ID=$CF_ACCESS_CLIENT_ID" >> $GITHUB_ENV
           echo "CF_ACCESS_CLIENT_SECRET=$CF_ACCESS_CLIENT_SECRET" >> $GITHUB_ENV
 
+      # Load SSH private key (matching the public key in ~evantrafton/.ssh/authorized_keys)
       - name: Start ssh-agent and add key
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      # Upload the tarball through the Access tunnel
+      # ✅ Fast fail if Access/SSH isn’t correct
+      - name: SSH connectivity smoke
+        run: |
+          set -euo pipefail
+          ssh -o StrictHostKeyChecking=accept-new \
+              -o ProxyCommand="cloudflared access ssh --hostname %h" \
+              "$USER@$HOST" \
+              "whoami && hostname && test -w '$APP_DIR' && echo 'APP_DIR is writable ✅'"
+
+      # ✅ Packaging (Fix A: git archive; use Fix B if you need build artifacts)
+      - name: Create release tarball (git archive)
+        run: |
+          set -euo pipefail
+          TAR="release-${GITHUB_SHA}.tgz"
+          git archive --format=tar.gz -o "$TAR" HEAD
+          echo "TAR=$TAR" >> "$GITHUB_ENV"
+
+      # Upload through Access
       - name: Upload release to server (/tmp)
         run: |
           set -euo pipefail
@@ -60,27 +60,11 @@ jobs:
               -o ProxyCommand="cloudflared access ssh --hostname %h" \
               "$TAR" "$USER@$HOST:/tmp/release.tgz"
 
-      # Extract into APP_DIR and (optionally) restart a service if present
+      # Unpack and (optionally) restart
       - name: Unpack + (optional) restart
         run: |
           set -euo pipefail
           ssh -o StrictHostKeyChecking=accept-new \
               -o ProxyCommand="cloudflared access ssh --hostname %h" \
               "$USER@$HOST" \
-              "
-                set -euo pipefail
-                mkdir -p '$APP_DIR'
-                tar -xzf /tmp/release.tgz -C '$APP_DIR' --strip-components 0
-                rm -f /tmp/release.tgz
-                echo 'Deployed to $APP_DIR'
-
-                # OPTIONAL: if you manage a systemd unit named \"dashboard\",
-                # restart it safely (won't fail the job if not present).
-                if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q '^dashboard\.service'; then
-                  echo 'Restarting systemd service: dashboard'
-                  sudo systemctl restart dashboard || (echo 'Failed to restart dashboard' && exit 1)
-                  systemctl --no-pager --full status dashboard || true
-                else
-                  echo 'No systemd service named \"dashboard\" found; skipping restart.'
-                fi
               "

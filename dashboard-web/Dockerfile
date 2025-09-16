@@ -1,31 +1,27 @@
-# Multi-stage build for React app
-FROM node:20-alpine AS builder
-
-WORKDIR /app
-
-# Copy package files
-COPY package*.json ./
-
-# Install dependencies
-RUN npm ci --only=production
-
-# Copy source code
-COPY . .
-
-# Build the app
-RUN npm run build
-
-# Production stage with nginx
-FROM nginx:alpine
-
-# Copy built app from builder stage
-COPY --from=builder /app/dist /usr/share/nginx/html
-
-# Copy nginx configuration
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-
-# Expose port 80
-EXPOSE 80
-
-# Start nginx
-CMD ["nginx", "-g", "daemon off;"]
+# ---- builder ----
+    FROM node:20-alpine AS builder
+    WORKDIR /app
+    
+    # copy manifest first for better cache
+    COPY package*.json ./
+    
+    # install WITH dev deps for build tools
+    RUN npm ci
+    
+    # now copy the rest of the source
+    COPY . .
+    
+    # build your app (tsc + vite)
+    RUN npm run build
+    
+    # ---- runtime ----
+    FROM nginx:alpine
+    # (optional) custom nginx.conf if you have one:
+    # COPY nginx.conf /etc/nginx/conf.d/default.conf
+    
+    # copy the built static files only
+    COPY --from=builder /app/dist /usr/share/nginx/html
+    
+    EXPOSE 80
+    CMD ["nginx", "-g", "daemon off;"]
+    

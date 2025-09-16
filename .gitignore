@@ -2,11 +2,11 @@
 /dashboard-web/dist
 /api-server/node_modules
 /dashboard-web/node_modules
-/api-server/package-lock.json
-/dashboard-web/package-lock.json
+
 /api-server/package.json
 /dashboard-web/package.json
 /api-server/tsconfig.json
 /dashboard-web/tsconfig.json
 /api-server/tsconfig.node.json
 /dashboard-web/tsconfig.node.json
+

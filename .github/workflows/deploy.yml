@@ -1,6 +1,9 @@
 name: Deploy via Cloudflare Access
+
 on:
   workflow_dispatch:
+  push:
+    branches: [ master ]  # change if needed
 
 jobs:
   deploy:
@@ -9,33 +12,26 @@ jobs:
       HOST: ssh.evantrafton.me
       USER: evantrafton
       APP_DIR: /opt/apps/dashboard
+      # Make Access service token available to every step (no interactive login)
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
 
     steps:
       - uses: actions/checkout@v4
 
-      # Install cloudflared client
-      - name: Install cloudflared
+      - name: Install cloudflared client
         run: |
+          set -euo pipefail
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           cloudflared --version
 
-      # Export Access Service Token (must be in repo secrets)
-      - name: Export Cloudflare Access env
-        env:
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-        run: |
-          echo "CF_ACCESS_CLIENT_ID=$CF_ACCESS_CLIENT_ID" >> $GITHUB_ENV
-          echo "CF_ACCESS_CLIENT_SECRET=$CF_ACCESS_CLIENT_SECRET" >> $GITHUB_ENV
-
-      # Load SSH private key (matching the public key in ~evantrafton/.ssh/authorized_keys)
       - name: Start ssh-agent and add key
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      # ✅ Fast fail if Access/SSH isn’t correct
+      # Fast fail if Access/SSH isn't correct
       - name: SSH connectivity smoke
         run: |
           set -euo pipefail
@@ -44,15 +40,14 @@ jobs:
               "$USER@$HOST" \
               "whoami && hostname && test -w '$APP_DIR' && echo 'APP_DIR is writable ✅'"
 
-      # ✅ Packaging (Fix A: git archive; use Fix B if you need build artifacts)
-      - name: Create release tarball (git archive)
+      # Package repo at HEAD (no 'file changed' issue)
+      - name: Create release tarball
         run: |
           set -euo pipefail
           TAR="release-${GITHUB_SHA}.tgz"
           git archive --format=tar.gz -o "$TAR" HEAD
-          echo "TAR=$TAR" >> "$GITHUB_ENV"
+          echo "TAR=$TAR" >> $GITHUB_ENV
 
-      # Upload through Access
       - name: Upload release to server (/tmp)
         run: |
           set -euo pipefail
@@ -60,11 +55,21 @@ jobs:
               -o ProxyCommand="cloudflared access ssh --hostname %h" \
               "$TAR" "$USER@$HOST:/tmp/release.tgz"
 
-      # Unpack and (optionally) restart
-      - name: Unpack + (optional) restart
+      - name: Unpack on server + (optional) restart
         run: |
           set -euo pipefail
-          ssh -o StrictHostKeyChecking=accept-new \
-              -o ProxyCommand="cloudflared access ssh --hostname %h" \
-              "$USER@$HOST" \
-              "
+          # Pass APP_DIR to the remote shell to avoid nested quoting issues
+          ssh -T -o StrictHostKeyChecking=accept-new \
+                -o ProxyCommand="cloudflared access ssh --hostname %h" \
+                "$USER@$HOST" "APP_DIR='$APP_DIR' bash -s" <<'REMOTE'
+          set -euo pipefail
+          mkdir -p "$APP_DIR"
+          tar -xzf /tmp/release.tgz -C "$APP_DIR"
+          rm -f /tmp/release.tgz
+          echo "Deployed to $APP_DIR"
+
+          # Example: Docker Compose reload (uncomment if you use it)
+          # if [ -f "$APP_DIR/docker-compose.yml" ]; then
+          #   cd "$APP_DIR" && docker compose pull && docker compose up -d --build
+          # fi
+REMOTE
